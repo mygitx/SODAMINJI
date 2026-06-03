@@ -1,716 +1,1050 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { 
-  Folder, Plus, FileText, Users, Printer, Settings, 
-  Wand2, Trash2, ArrowUp, ArrowDown, Image as ImageIcon,
-  CheckCircle, Loader2, Sparkles, LogIn, LayoutTemplate, Save, Lock
-} from 'lucide-react';
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NEWS MAKER - 실시간 협업 신문 제작 플랫폼</title>
+  
+  <!-- Tailwind CSS & Google Fonts -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700;900&display=swap" rel="stylesheet">
+  
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
 
-// --- Firebase Imports ---
-import { initializeApp } from 'firebase/app';
-import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, doc, setDoc, getDoc, onSnapshot, collection } from 'firebase/firestore';
-
-// --- API & Config ---
-const apiKey = ""; // Gemini API Key (런타임 주입)
-
-const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-
-// --- Helper Functions ---
-async function callGeminiAPI(prompt, systemInstruction) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
-  const payload = {
-    contents: [{ parts: [{ text: prompt }] }],
-    systemInstruction: { parts: [{ text: systemInstruction }] }
-  };
-
-  let retries = 5;
-  let delay = 1000;
-  while (retries > 0) {
-    try {
-      const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-      if (!response.ok) throw new Error('API Error');
-      const data = await response.json();
-      return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-    } catch (error) {
-      retries--;
-      if (retries === 0) throw error;
-      await new Promise(res => setTimeout(res, delay));
-      delay *= 2;
+  <style>
+    body {
+      font-family: 'Noto Sans KR', sans-serif;
     }
-  }
-}
+    
+    /* 인쇄 전용 미디어 쿼리 - 고화질 벡터 출력 최적화 */
+    @media print {
+      body {
+        background-color: white !important;
+        color: black !important;
+        margin: 0 !important;
+        padding: 0 !important;
+      }
+      .no-print {
+        display: none !important;
+      }
+      .print-only {
+        display: block !important;
+      }
+      .newspaper-page {
+        box-shadow: none !important;
+        border: none !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        background: transparent !important;
+      }
+      .block-controls {
+        display: none !important;
+      }
+      input, textarea {
+        resize: none;
+        overflow: hidden;
+        border: none !important;
+        background: transparent !important;
+        outline: none !important;
+        box-shadow: none !important;
+      }
+    }
+    
+    @page {
+      size: A4 portrait;
+      margin: 15mm;
+    }
 
-// 이미지 압축 (DB 용량 제한 방지)
-const compressImage = (file) => {
-  return new Promise((resolve) => {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const img = new Image();
-      img.onload = () => {
-        const canvas = document.createElement('canvas');
-        let { width, height } = img;
-        const maxDim = 800;
-        if (width > height && width > maxDim) { height *= maxDim / width; width = maxDim; } 
-        else if (height > maxDim) { width *= maxDim / height; height = maxDim; }
-        canvas.width = width; canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0, width, height);
-        resolve(canvas.toDataURL('image/jpeg', 0.8));
+    /* 드래그 앤 드롭 및 카드 리스트 깔끔한 트랜지션 */
+    .fade-in {
+      animation: fadeIn 0.4s ease-out forwards;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+  </style>
+</head>
+<body class="bg-gray-50 text-black min-h-screen pb-16">
+
+  <!-- Toast 알림 컨테이너 (alert() 대체용) -->
+  <div id="toast-container" class="no-print fixed top-6 right-6 z-50 flex flex-col gap-3 pointer-events-none"></div>
+
+  <!-- 글로벌 헤더 (인쇄 시 숨김) -->
+  <header class="no-print border-b-4 border-black bg-white p-4 sticky top-0 z-40 shadow-sm">
+    <div class="max-w-6xl mx-auto flex justify-between items-center">
+      <div class="flex items-center gap-2 cursor-pointer" id="logo-btn">
+        <i data-lucide="file-text" class="w-8 h-8 text-black"></i>
+        <h1 class="text-2xl font-black tracking-tighter">NEWS MAKER</h1>
+      </div>
+      
+      <div id="header-user-badge" class="hidden flex items-center gap-4">
+        <span class="font-bold bg-gray-100 px-3 py-1 border-2 border-black flex items-center gap-1.5 text-sm">
+          <i data-lucide="user" class="w-4 h-4"></i>
+          <span id="badge-nickname">에디터</span>
+        </span>
+        <button id="btn-leave-room" class="hidden px-3 py-1 border-2 border-black font-bold text-sm bg-white hover:bg-gray-100 transition">
+          서류함으로
+        </button>
+        <button id="btn-logout" class="px-3 py-1 border-2 border-black font-bold text-sm bg-black text-white hover:bg-gray-800 transition">
+          로그아웃
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- 메인 레이아웃 뷰 홀더 -->
+  <main class="p-4 md:p-8 max-w-6xl mx-auto">
+    
+    <!-- 1. 로그인 뷰 -->
+    <section id="view-login" class="fade-in max-w-md mx-auto mt-16 bg-white border-4 border-black p-8 shadow-[8px_8px_0px_0px_rgba(0,0,0,1)]">
+      <div class="text-center mb-8">
+        <h2 class="text-3xl font-black mb-2">에디터 인증</h2>
+        <p class="font-bold text-gray-600 text-sm">나만의 닉네임과 패스코드를 입력해 주세요.<br>처음 쓰는 닉네임은 새 계정으로 자동 등록됩니다.</p>
+      </div>
+      <form id="login-form" class="space-y-6">
+        <div>
+          <label class="block font-black text-base mb-1">에디터명 (닉네임)</label>
+          <input 
+            type="text" id="login-nickname" required 
+            class="w-full border-2 border-black p-3 font-bold outline-none focus:ring-2 focus:ring-black"
+            placeholder="예: 지우편집장, 민우기자"
+          >
+        </div>
+        <div>
+          <label class="block font-black text-base mb-1">계정 패스코드 (비밀번호)</label>
+          <input 
+            type="password" id="login-passcode" required 
+            class="w-full border-2 border-black p-3 font-bold outline-none focus:ring-2 focus:ring-black"
+            placeholder="숫자나 문자로 된 암호"
+          >
+        </div>
+        <button type="submit" id="btn-login-submit" class="w-full bg-black text-white py-4 font-bold border-2 border-black hover:bg-gray-800 transition flex items-center justify-center gap-2">
+          <i data-lucide="log-in" class="w-5 h-5"></i> 에디터 확인 및 입장
+        </button>
+      </form>
+    </section>
+
+    <!-- 2. 아카이브 및 방 생성 뷰 -->
+    <section id="view-archive" class="hidden fade-in">
+      <div class="flex flex-col md:flex-row justify-between items-start md:items-end mb-8 border-b-4 border-black pb-4 gap-4">
+        <div>
+          <h2 class="text-4xl font-black tracking-tight">발행 서류함</h2>
+          <p class="text-gray-600 mt-2 font-bold">참여하고 싶은 방 이름(비밀번호)을 입력해 새로 만들거나, 목록에서 선택해 실시간 동시 작업을 시작하세요.</p>
+        </div>
+        <form id="join-room-form" class="flex gap-2 w-full md:w-auto">
+          <input 
+            type="text" id="room-input" required 
+            class="border-2 border-black p-2 font-bold outline-none focus:ring-2 focus:ring-black flex-grow md:w-48"
+            placeholder="입장할 방 이름 (비밀번호)"
+          >
+          <button type="submit" class="bg-black text-white px-4 py-2 font-bold border-2 border-black hover:bg-gray-800 transition flex items-center gap-1.5 shrink-0">
+            <i data-lucide="plus" class="w-4 h-4"></i> 방 만들기 / 참여
+          </button>
+        </form>
+      </div>
+
+      <!-- 보관 리스트 그리드 -->
+      <div id="archive-list-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8 pt-4">
+        <!-- 동적 렌더링 영역 -->
+      </div>
+    </section>
+
+    <!-- 3. 협업 에디터 및 신문지면 뷰 -->
+    <section id="view-editor" class="hidden fade-in">
+      <div class="flex flex-col lg:flex-row gap-8">
+        
+        <!-- 왼쪽 사이드바 (no-print) -->
+        <div class="lg:w-64 flex-shrink-0 no-print flex flex-col gap-6">
+          <div class="bg-white border-4 border-black p-4 space-y-4 sticky top-24">
+            
+            <div class="flex items-center justify-between border-b-2 border-black pb-2">
+              <h3 class="font-black text-lg">작업 현황</h3>
+              <span id="save-status-indicator" class="flex items-center gap-1 text-sm font-bold text-green-600 transition-all duration-300">
+                <i data-lucide="save" class="w-4 h-4"></i> 저장됨
+              </span>
+            </div>
+
+            <!-- 테마 선택 -->
+            <div class="space-y-1.5">
+              <label class="font-bold text-sm flex items-center gap-1.5">
+                <i data-lucide="layout-template" class="w-4 h-4"></i> 디자인 테마
+              </label>
+              <select id="theme-selector" class="w-full border-2 border-black p-2 font-bold bg-gray-50 cursor-pointer outline-none">
+                <option value="classic">클래식 모노톤 (전통지면)</option>
+                <option value="modern">모던 미니멀 (뉴스레터)</option>
+                <option value="bold">볼드 임팩트 (매거진)</option>
+              </select>
+            </div>
+
+            <!-- 블록 추가 버튼 영역 -->
+            <div class="border-t-2 border-black pt-4 mt-2 space-y-2">
+              <span class="font-bold text-xs text-gray-500 uppercase tracking-wider block">지면 구성 요소 추가</span>
+              <button id="add-block-headline" class="w-full text-left font-bold text-sm border-2 border-black p-2 bg-white hover:bg-gray-100 transition flex items-center gap-2">
+                <i data-lucide="heading" class="w-4 h-4"></i> 헤드라인 추가
+              </button>
+              <button id="add-block-text" class="w-full text-left font-bold text-sm border-2 border-black p-2 bg-white hover:bg-gray-100 transition flex items-center gap-2">
+                <i data-lucide="align-justify" class="w-4 h-4"></i> 본문 단락 추가
+              </button>
+              <button id="add-block-image" class="w-full text-left font-bold text-sm border-2 border-black p-2 bg-white hover:bg-gray-100 transition flex items-center gap-2">
+                <i data-lucide="image" class="w-4 h-4"></i> 사진 추가틀 생성
+              </button>
+            </div>
+
+            <!-- AI 비서 토글 -->
+            <div class="border-t-2 border-black pt-4 mt-2 space-y-2">
+              <label class="flex items-center justify-between cursor-pointer group">
+                <span class="font-bold text-sm flex items-center gap-1.5">
+                  <i data-lucide="sparkles" id="ai-icon-indicator" class="w-4 h-4 transition-colors"></i> 
+                  AI 기자 비서
+                </span>
+                <div id="ai-toggle-switch" class="relative inline-flex h-6 w-11 items-center rounded-full border-2 border-black transition-colors bg-gray-200">
+                  <span id="ai-toggle-handle" class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform translate-x-1"></span>
+                </div>
+              </label>
+              <p class="text-[11px] text-gray-500 font-medium leading-tight">활성화 시 작성 중인 단락에 호버하여 AI 헤드라인 및 기자체 교정 버튼을 쓸 수 있습니다.</p>
+            </div>
+
+            <!-- 인쇄 전용 고화질 PDF 저장 -->
+            <div class="border-t-2 border-black pt-4">
+              <button id="btn-trigger-print" class="w-full bg-black text-white p-3 font-bold border-2 border-black hover:bg-gray-800 transition flex items-center justify-center gap-2 shadow-[4px_4px_0px_0px_rgba(0,0,0,0.15)]">
+                <i data-lucide="printer" class="w-5 h-5"></i> 고화질 인쇄 / PDF 저장
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 오른쪽: 실시간 신문 지면 캔버스 -->
+        <div class="flex-grow flex justify-center">
+          <div id="newspaper-canvas" class="newspaper-page bg-white w-full max-w-[800px] min-h-[1130px] flex flex-col transition-all duration-300">
+            
+            <!-- 신문 헤더 영역 -->
+            <div id="canvas-header" class="text-center relative group transition-all">
+              <input 
+                type="text" id="input-newspaper-title"
+                class="w-full text-center outline-none bg-transparent font-black tracking-tighter placeholder:text-gray-300"
+                placeholder="신문 제호 입력"
+              >
+              <div id="canvas-meta" class="flex justify-between items-center mt-4 pt-2 text-sm tracking-widest font-bold">
+                <input 
+                  type="date" id="input-newspaper-date"
+                  class="bg-transparent outline-none cursor-pointer text-left w-1/3"
+                >
+                <input 
+                  type="text" id="input-newspaper-issue"
+                  class="bg-transparent outline-none text-center w-1/3 placeholder:text-gray-400"
+                  placeholder="통권 제 O 호"
+                >
+                <div class="flex items-center gap-1 justify-end w-1/3">
+                  <span class="shrink-0 text-gray-500">발행인:</span>
+                  <input 
+                    type="text" id="input-newspaper-publisher"
+                    class="bg-transparent outline-none text-right placeholder:text-gray-400 w-24"
+                    placeholder="발행인 성명"
+                  >
+                </div>
+              </div>
+            </div>
+
+            <!-- 동적 지면 단락 영역 (다단 구조 매핑) -->
+            <div class="flex-grow space-y-6 mt-8" style="column-count: 1; column-gap: 2rem;">
+              <div id="canvas-blocks-grid" class="md:columns-2 gap-8 space-y-8">
+                <!-- 동적으로 기사 블록들이 생성/갱신되는 공간 -->
+              </div>
+            </div>
+
+            <!-- 하단 바 -->
+            <div id="canvas-footer" class="mt-12 border-t-2 border-black pt-2 text-center text-xs font-bold uppercase tracking-widest text-gray-400">
+              Created with News Maker Platform
+            </div>
+
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Firebase 및 핵심 애플리케이션 비즈니스 로직 -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+    import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { getFirestore, doc, getDoc, setDoc, updateDoc, collection, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+    // 글로벌 환경 변수 파싱
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+    const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+    const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+    const apiKey = ""; // 런타임에 삽입될 Gemini API Key
+
+    // Firebase 앱 초기화
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+
+    // alert()과 confirm()을 대체하는 완전한 비동기 토스트 알림 시스템
+    function showToast(message, type = 'success') {
+      const toastContainer = document.getElementById('toast-container');
+      const toast = document.createElement('div');
+      
+      const colors = {
+        success: 'bg-black text-white border-black',
+        error: 'bg-white text-red-600 border-red-600',
+        info: 'bg-white text-black border-black'
       };
-      img.src = e.target.result;
+
+      toast.className = `p-4 border-4 font-bold shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] ${colors[type] || colors.info} flex items-center gap-2 transform translate-y-4 opacity-0 transition-all duration-300 pointer-events-auto`;
+      
+      let iconName = 'info';
+      if (type === 'success') iconName = 'check-circle';
+      if (type === 'error') iconName = 'alert-triangle';
+
+      toast.innerHTML = `<i data-lucide="${iconName}" class="w-5 h-5 shrink-0"></i> <span>${message}</span>`;
+      toastContainer.appendChild(toast);
+      lucide.createIcons();
+
+      // 애니메이션 유도
+      setTimeout(() => {
+        toast.classList.remove('translate-y-4', 'opacity-0');
+      }, 50);
+
+      // 3.5초 후 제거
+      setTimeout(() => {
+        toast.classList.add('translate-y-4', 'opacity-0');
+        setTimeout(() => toast.remove(), 300);
+      }, 3500);
+    }
+
+    // 애플리케이션 싱글톤 상태값 관리
+    let appState = {
+      user: null,
+      nickname: '',
+      currentView: 'login', // 'login' | 'archive' | 'editor'
+      activeRoomId: '',
+      docData: null,
+      aiEnabled: false,
+      saveTimeout: null,
+      joinedRooms: []
     };
-    reader.readAsDataURL(file);
-  });
-};
 
-// --- Common UI Components ---
-const Button = ({ children, onClick, variant = 'primary', className = '', disabled = false, type = "button" }) => {
-  const baseStyle = "flex items-center justify-center gap-2 px-4 py-2 font-bold transition-all border-2 border-black";
-  const variants = {
-    primary: "bg-black text-white hover:bg-gray-800",
-    secondary: "bg-white text-black hover:bg-gray-100",
-    danger: "bg-white text-red-600 hover:bg-red-50 border-red-600",
-    ghost: "border-none hover:bg-gray-100"
-  };
-  return (
-    <button type={type} onClick={onClick} disabled={disabled} className={`${baseStyle} ${variants[variant]} ${disabled ? 'opacity-50 cursor-not-allowed' : ''} ${className}`}>
-      {children}
-    </button>
-  );
-};
+    // 뷰 전환 가시성 관리 함수
+    function switchView(viewName) {
+      appState.currentView = viewName;
+      document.getElementById('view-login').classList.add('hidden');
+      document.getElementById('view-archive').classList.add('hidden');
+      document.getElementById('view-editor').classList.add('hidden');
+      document.getElementById('header-user-badge').classList.add('hidden');
+      document.getElementById('btn-leave-room').classList.add('hidden');
 
-// ==========================================
-// Main App Component
-// ==========================================
-export default function App() {
-  const [user, setUser] = useState(null);
-  const [nickname, setNickname] = useState('');
-  const [currentView, setCurrentView] = useState('login'); // 'login', 'archive', 'editor'
-  const [activeRoomId, setActiveRoomId] = useState('');
-  const [aiEnabled, setAiEnabled] = useState(false);
-  const [archiveList, setArchiveList] = useState([]);
+      if (viewName === 'login') {
+        document.getElementById('view-login').classList.remove('hidden');
+      } else if (viewName === 'archive') {
+        document.getElementById('view-archive').classList.remove('hidden');
+        document.getElementById('header-user-badge').classList.remove('hidden');
+        document.getElementById('badge-nickname').textContent = appState.nickname;
+      } else if (viewName === 'editor') {
+        document.getElementById('view-editor').classList.remove('hidden');
+        document.getElementById('header-user-badge').classList.remove('hidden');
+        document.getElementById('btn-leave-room').classList.remove('hidden');
+        document.getElementById('badge-nickname').textContent = appState.nickname;
+      }
+    }
 
-  // 1. Firebase 인증 초기화
-  useEffect(() => {
-    const initAuth = async () => {
+    // Firebase 인증 초기 가입/확인 시스템
+    async function handleLoginFlow(nickname, passcode) {
+      if (!nickname.trim() || !passcode.trim()) {
+        showToast("이름과 패스코드를 모두 입력해 주세요.", "error");
+        return;
+      }
+
+      // RULE 3 준수: Auth가 완료된 후 작업
+      const userRef = doc(db, 'artifacts', appId, 'public', 'data', 'users', nickname.trim());
+      
       try {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
+        const userSnap = await getDoc(userRef);
+        if (userSnap.exists()) {
+          const stored = userSnap.data();
+          if (stored.passcode === passcode) {
+            appState.nickname = nickname.trim();
+            appState.joinedRooms = stored.joinedRooms || [];
+            showToast(`${nickname}님, 환영합니다!`);
+            switchView('archive');
+          } else {
+            showToast("이미 사용 중인 닉네임입니다. 패스코드를 다시 확인하시거나 다른 닉네임을 설정해 주세요.", "error");
+          }
+        } else {
+          // 신규 가입 생성
+          await setDoc(userRef, {
+            passcode: passcode,
+            createdAt: Date.now(),
+            joinedRooms: []
+          });
+          appState.nickname = nickname.trim();
+          appState.joinedRooms = [];
+          showToast(`신규 에디터 계정 [${nickname}] 등록 및 로그인이 완료되었습니다.`);
+          switchView('archive');
+        }
+      } catch (err) {
+        console.error("Login verification error:", err);
+        showToast("인증 처리 중 오류가 발생했습니다.", "error");
+      }
+    }
+
+    // 서류 정리함(아카이브) 실시간 목록 갱신 리스너
+    function initArchiveSubscription() {
+      // RULE 1 준수: Strict Path
+      const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'newspapers');
+      
+      onSnapshot(colRef, (snap) => {
+        const grid = document.getElementById('archive-list-grid');
+        grid.innerHTML = '';
+
+        const docs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        
+        // 방 접속 권한 필터링: 내가 직접 비밀번호를 입력해 들어간 방만 보이도록 설정
+        const myDocs = docs.filter(item => appState.joinedRooms.includes(item.id));
+        
+        // 최근 가공순 정렬 (RULE 2 준수: 인메모리 정렬 수행)
+        myDocs.sort((a, b) => (b.lastUpdatedAt || 0) - (a.lastUpdatedAt || 0));
+
+        if (myDocs.length === 0) {
+          grid.innerHTML = `
+            <div class="col-span-full py-20 text-center border-4 border-dashed border-gray-300 bg-white">
+              <i data-lucide="lock" class="w-12 h-12 mx-auto text-gray-300 mb-4"></i>
+              <p class="text-xl font-bold text-gray-400">참여 중인 신문 방이 없습니다.</p>
+              <p class="text-sm text-gray-400 mt-2">상단에 접속할 방 이름(비밀번호)을 정확히 입력해 참여하거나 새로 만드세요.</p>
+            </div>
+          `;
+          lucide.createIcons();
+          return;
+        }
+
+        myDocs.forEach((item) => {
+          const card = document.createElement('div');
+          card.className = "group relative bg-white border-4 border-black p-6 pt-10 cursor-pointer hover:-translate-y-2 hover:shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] transition-all fade-in";
+          card.innerHTML = `
+            <div class="absolute -top-[2px] -left-[4px] border-4 border-black border-b-0 bg-black text-white px-4 py-1 font-bold text-sm tracking-widest uppercase">
+              ROOM: ${item.id}
+            </div>
+            <h3 class="text-2xl font-black mb-4 leading-tight group-hover:underline decoration-4 underline-offset-4">
+              ${item.title || '제호 없음'}
+            </h3>
+            <div class="border-t-2 border-black pt-4 mt-4 space-y-2 text-sm font-bold text-gray-700">
+              <div class="flex justify-between">
+                <span>지면 일자</span>
+                <span>${item.date || '-'}</span>
+              </div>
+              <div class="flex justify-between">
+                <span>마지막 편집자</span>
+                <span>${item.lastUpdatedBy || '알 수 없음'}</span>
+              </div>
+            </div>
+          `;
+          
+          card.addEventListener('click', () => {
+            enterEditorRoom(item.id);
+          });
+          grid.appendChild(card);
+        });
+        lucide.createIcons();
+      }, (err) => {
+        console.error("Archive subscription failure:", err);
+      });
+    }
+
+    // 특정 방 입장 및 동시 작업 환경 구동
+    let roomUnsubscribe = null;
+    function enterEditorRoom(roomId) {
+      appState.activeRoomId = roomId;
+      switchView('editor');
+
+      // RULE 1 준수: Strict Path
+      const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'newspapers', roomId);
+
+      if (roomUnsubscribe) roomUnsubscribe();
+
+      roomUnsubscribe = onSnapshot(docRef, (snapshot) => {
+        if (snapshot.exists()) {
+          const data = snapshot.data();
+          appState.docData = data;
+          syncNewspaperDataToCanvas(data);
+        } else {
+          // 초기 신문 레이아웃 생성
+          const initialNewspaper = {
+            title: '우리동네 타임즈',
+            date: new Date().toISOString().split('T')[0],
+            issueName: '제 1 호',
+            publisher: appState.nickname,
+            theme: 'classic',
+            blocks: [
+              { id: 'b1', type: 'headline', content: '여기에 메인 기사 제목을 적어주세요!' },
+              { id: 'b2', type: 'text', content: '기사 본문을 입력하는 공간입니다. 친구와 동시에 타입해도 안전하게 보관됩니다.' }
+            ],
+            lastUpdatedBy: appState.nickname,
+            lastUpdatedAt: Date.now()
+          };
+          setDoc(docRef, initialNewspaper);
+        }
+      }, (err) => {
+        console.error("Newspaper snapshot error:", err);
+        showToast("방을 구독하는 중 실패했습니다.", "error");
+      });
+    }
+
+    // 테마 스타일 매핑 데이터셋
+    const themeStyles = {
+      classic: {
+        wrapper: ["border-4", "border-black", "p-8", "lg:p-12", "shadow-[16px_16px_0px_0px_rgba(0,0,0,0.1)]"],
+        header: ["border-b-8", "border-double", "border-black", "pb-6"],
+        title: ["font-serif", "text-5xl", "md:text-7xl", "font-black", "uppercase"],
+        meta: ["border-t-2", "border-black", "font-bold", "uppercase"],
+        block: ["border-t-2", "border-black", "pt-2"],
+        headline: ["font-serif", "text-3xl", "font-black"]
+      },
+      modern: {
+        wrapper: ["border-[1px]", "border-gray-300", "p-8", "lg:p-12", "bg-white"],
+        header: ["border-b-[1px]", "border-gray-300", "pb-8"],
+        title: ["text-4xl", "md:text-6xl", "font-light", "tracking-tight"],
+        meta: ["text-gray-500", "font-medium"],
+        block: ["border-t-[1px]", "border-gray-200", "pt-4"],
+        headline: ["text-2xl", "font-bold", "tracking-tight"]
+      },
+      bold: {
+        wrapper: ["border-8", "border-black", "p-8", "lg:p-12", "shadow-[16px_16px_0px_0px_rgba(0,0,0,1)]"],
+        header: ["border-b-8", "border-black", "pb-4", "bg-black", "text-white", "px-4", "pt-4"],
+        title: ["text-5xl", "md:text-7xl", "font-black", "uppercase", "tracking-tighter"],
+        meta: ["bg-black", "text-white", "font-black", "uppercase", "px-1"],
+        block: ["border-t-4", "border-black", "pt-2"],
+        headline: ["text-4xl", "font-black", "uppercase"]
+      }
+    };
+
+    // DOM을 강제로 지우지 않고, 포커스 이벤트를 유지하면서 업데이트를 병합하는 정밀 캔버스 매핑 시스템
+    function syncNewspaperDataToCanvas(data) {
+      const activeTheme = themeStyles[data.theme] || themeStyles.classic;
+      
+      // 1. 테마 적용 (클래스 갱신)
+      const canvas = document.getElementById('newspaper-canvas');
+      canvas.className = "newspaper-page bg-white w-full max-w-[800px] min-h-[1130px] flex flex-col transition-all duration-300";
+      canvas.classList.add(...activeTheme.wrapper);
+
+      const header = document.getElementById('canvas-header');
+      header.className = "text-center relative group transition-all";
+      header.classList.add(...activeTheme.header);
+
+      const titleInput = document.getElementById('input-newspaper-title');
+      titleInput.className = "w-full text-center outline-none bg-transparent placeholder:text-gray-300";
+      titleInput.classList.add(...activeTheme.title);
+      if (document.activeElement !== titleInput) titleInput.value = data.title || '';
+
+      const meta = document.getElementById('canvas-meta');
+      meta.className = "flex justify-between items-center mt-4 pt-2 text-sm tracking-widest font-bold";
+      meta.classList.add(...activeTheme.meta);
+
+      const dateInput = document.getElementById('input-newspaper-date');
+      if (document.activeElement !== dateInput) dateInput.value = data.date || '';
+
+      const issueInput = document.getElementById('input-newspaper-issue');
+      if (document.activeElement !== issueInput) issueInput.value = data.issueName || '';
+
+      const pubInput = document.getElementById('input-newspaper-publisher');
+      if (document.activeElement !== pubInput) pubInput.value = data.publisher || '';
+
+      // 테마 변경용 셀렉터 동기화
+      document.getElementById('theme-selector').value = data.theme || 'classic';
+
+      // 2. 블록 동기화 (커서 튐 방지 처리)
+      const container = document.getElementById('canvas-blocks-grid');
+      const blocks = data.blocks || []; // 데이터 방어 로직 추가
+      
+      // 현재 지면의 불필요 블록 제거
+      const currentIds = new Set(blocks.map(b => b.id));
+      Array.from(container.children).forEach(child => {
+        const id = child.dataset.blockId;
+        if (!currentIds.has(id)) child.remove();
+      });
+
+      // 데이터 순서대로 정렬 및 블록 업데이트/추가
+      blocks.forEach((block, index) => {
+        let blockEl = document.getElementById(`block-${block.id}`);
+        if (!blockEl) {
+          blockEl = createBlockNode(block, index, activeTheme);
+          container.appendChild(blockEl);
+        } else {
+          // 기존 요소의 테마 클래스 갱신 및 값 주입
+          blockEl.className = `relative group break-inside-avoid ${activeTheme.block.join(' ')}`;
+          updateBlockNode(blockEl, block, activeTheme);
+        }
+      });
+      
+      lucide.createIcons();
+    }
+
+    // 동적 블록 돔 객체 제작
+    function createBlockNode(block, index, theme) {
+      const el = document.createElement('div');
+      el.id = `block-${block.id}`;
+      el.dataset.blockId = block.id;
+      el.className = `relative group break-inside-avoid ${theme.block.join(' ')}`;
+
+      // 조작용 컨트롤 도구 바
+      const controls = document.createElement('div');
+      controls.className = "block-controls no-print absolute -left-4 -top-4 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity bg-white border-2 border-black flex flex-col z-20 shadow-sm";
+      controls.innerHTML = `
+        <button class="btn-block-up p-1 hover:bg-gray-200 border-b-2 border-black" title="위로"><i data-lucide="arrow-up" class="w-3.5 h-3.5"></i></button>
+        <button class="btn-block-down p-1 hover:bg-gray-200 border-b-2 border-black" title="아래로"><i data-lucide="arrow-down" class="w-3.5 h-3.5"></i></button>
+        <button class="btn-block-delete p-1 hover:bg-red-100 text-red-600" title="삭제"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
+      `;
+
+      // 클릭 시 위아래 조절 및 삭제
+      controls.querySelector('.btn-block-up').addEventListener('click', (e) => { e.preventDefault(); shiftBlockOrder(block.id, -1); });
+      controls.querySelector('.btn-block-down').addEventListener('click', (e) => { e.preventDefault(); shiftBlockOrder(block.id, 1); });
+      controls.querySelector('.btn-block-delete').addEventListener('click', (e) => { e.preventDefault(); removeBlock(block.id); });
+
+      const contentWrapper = document.createElement('div');
+      contentWrapper.className = "block-content-container relative w-full group/ai p-1 -m-1 border-2 border-transparent hover:border-purple-200 transition-colors";
+
+      if (block.type === 'headline') {
+        const area = document.createElement('textarea');
+        area.className = `w-full leading-tight outline-none bg-transparent resize-none overflow-hidden placeholder-gray-300 font-black ${theme.headline.join(' ')}`;
+        area.rows = 1;
+        area.placeholder = "헤드라인을 입력하세요";
+        area.value = block.content;
+        area.addEventListener('input', (e) => {
+          autoResizeTextArea(area);
+          triggerBlockContentChange(block.id, e.target.value);
+        });
+        contentWrapper.appendChild(area);
+        setTimeout(() => autoResizeTextArea(area), 50);
+
+      } else if (block.type === 'text') {
+        const area = document.createElement('textarea');
+        area.className = "w-full text-base font-medium leading-relaxed outline-none bg-transparent resize-none overflow-hidden placeholder-gray-300 text-justify";
+        area.rows = 4;
+        area.placeholder = "기사 본문을 자유롭게 기술해 주세요...";
+        area.value = block.content;
+        area.addEventListener('input', (e) => {
+          autoResizeTextArea(area);
+          triggerBlockContentChange(block.id, e.target.value);
+        });
+        contentWrapper.appendChild(area);
+        setTimeout(() => autoResizeTextArea(area), 50);
+
+      } else if (block.type === 'image') {
+        const imgFrame = document.createElement('div');
+        imgFrame.className = "w-full image-frame-holder";
+        renderImageBlockInside(imgFrame, block);
+        contentWrapper.appendChild(imgFrame);
+      }
+
+      // AI 추천 버튼 유닛 생성
+      const aiFloatingBtn = document.createElement('div');
+      aiFloatingBtn.className = "ai-floating-kit no-print absolute -top-4 right-0 opacity-0 group-hover/ai:opacity-100 focus-within:opacity-100 transition-opacity z-20 flex gap-1";
+      aiFloatingBtn.innerHTML = `
+        <button class="btn-ai-sparkle flex items-center gap-1 bg-purple-600 text-white text-xs px-3 py-1.5 font-bold rounded-md border-2 border-black hover:bg-purple-700 shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]">
+          <i data-lucide="sparkles" class="w-3.5 h-3.5"></i>
+          <span class="ai-btn-text">AI 처리</span>
+        </button>
+      `;
+
+      aiFloatingBtn.querySelector('.btn-ai-sparkle').addEventListener('click', (e) => {
+        e.preventDefault();
+        requestGeminiAIPolish(block.id, block.type);
+      });
+
+      contentWrapper.appendChild(aiFloatingBtn);
+      el.appendChild(controls);
+      el.appendChild(contentWrapper);
+
+      // AI 비서 활성화 토글 연동
+      if (!appState.aiEnabled) aiFloatingBtn.classList.add('hidden');
+
+      return el;
+    }
+
+    // 기존 동적인 블록들의 콘텐츠가 꼬이지 않게 속성 갱신
+    function updateBlockNode(el, block, theme) {
+      const textNode = el.querySelector('textarea');
+      const aiFloatingBtn = el.querySelector('.ai-floating-kit');
+
+      // AI 비서 노출 여부 제어
+      if (aiFloatingBtn) {
+        if (appState.aiEnabled) aiFloatingBtn.classList.remove('hidden');
+        else aiFloatingBtn.classList.add('hidden');
+        
+        const btnText = aiFloatingBtn.querySelector('.ai-btn-text');
+        if (btnText) btnText.textContent = block.type === 'headline' ? 'AI 추천' : '기자체 교정';
+      }
+
+      if (block.type === 'headline' && textNode) {
+        textNode.className = `w-full leading-tight outline-none bg-transparent resize-none overflow-hidden placeholder-gray-300 font-black ${theme.headline.join(' ')}`;
+        if (document.activeElement !== textNode) {
+          textNode.value = block.content;
+          autoResizeTextArea(textNode);
+        }
+      } else if (block.type === 'text' && textNode) {
+        if (document.activeElement !== textNode) {
+          textNode.value = block.content;
+          autoResizeTextArea(textNode);
+        }
+      } else if (block.type === 'image') {
+        const frame = el.querySelector('.image-frame-holder');
+        if (frame) renderImageBlockInside(frame, block);
+      }
+    }
+
+    // 텍스트 상자 자동 늘어남 제어
+    function autoResizeTextArea(element) {
+      element.style.height = 'auto';
+      element.style.height = element.scrollHeight + 'px';
+    }
+
+    // 이미지 업로드 블록 렌더링
+    function renderImageBlockInside(frame, block) {
+      if (block.content) {
+        frame.innerHTML = `
+          <div class="relative group/img">
+            <img src="${block.content}" alt="지면 사진" class="w-full h-auto border-2 border-black grayscale object-cover">
+            <button class="btn-clear-img no-print absolute top-2 right-2 bg-black text-white p-2 rounded-full opacity-0 group-hover/img:opacity-100 transition-opacity">
+              <i data-lucide="trash-2" class="w-4 h-4"></i>
+            </button>
+          </div>
+        `;
+        frame.querySelector('.btn-clear-img').addEventListener('click', (e) => {
+          e.preventDefault();
+          triggerBlockContentChange(block.id, '');
+        });
+      } else {
+        frame.innerHTML = `
+          <label class="no-print flex flex-col items-center justify-center w-full h-48 border-4 border-dashed border-gray-300 cursor-pointer hover:border-black transition-colors bg-gray-50">
+            <i data-lucide="image" class="w-8 h-8 text-gray-400 mb-2"></i>
+            <span class="font-bold text-gray-500 text-sm">클릭하여 사진 추가</span>
+            <input type="file" accept="image/*" class="hidden file-upload-input">
+          </label>
+        `;
+        frame.querySelector('.file-upload-input').addEventListener('change', async (e) => {
+          const file = e.target.files[0];
+          if (file) {
+            const dataUrl = await compressImage(file);
+            triggerBlockContentChange(block.id, dataUrl);
+          }
+        });
+      }
+      lucide.createIcons();
+    }
+
+    // 입력 지연 데이터 저장 트리거 (디바운싱 0.8초 적용)
+    function queueDocumentSave() {
+      document.getElementById('save-status-indicator').innerHTML = `<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> 저장 중...`;
+      document.getElementById('save-status-indicator').className = "flex items-center gap-1 text-sm font-bold text-yellow-600";
+      lucide.createIcons();
+
+      if (appState.saveTimeout) clearTimeout(appState.saveTimeout);
+
+      appState.saveTimeout = setTimeout(async () => {
+        try {
+          const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'newspapers', appState.activeRoomId);
+          await setDoc(docRef, {
+            ...appState.docData,
+            lastUpdatedBy: appState.nickname,
+            lastUpdatedAt: Date.now()
+          });
+          document.getElementById('save-status-indicator').innerHTML = `<i data-lucide="save" class="w-4 h-4"></i> 저장 완료`;
+          document.getElementById('save-status-indicator').className = "flex items-center gap-1 text-sm font-bold text-green-600";
+          lucide.createIcons();
+        } catch (err) {
+          console.error("Auto save failure:", err);
+          document.getElementById('save-status-indicator').innerHTML = `<i data-lucide="x" class="w-4 h-4 text-red-600"></i> 저장 실패`;
+          document.getElementById('save-status-indicator').className = "flex items-center gap-1 text-sm font-bold text-red-600";
+          lucide.createIcons();
+        }
+      }, 800);
+    }
+
+    // 데이터 상태 변이 함수 집합
+    function triggerBlockContentChange(blockId, newContent) {
+      appState.docData.blocks = appState.docData.blocks.map(b => b.id === blockId ? { ...b, content: newContent } : b);
+      queueDocumentSave();
+    }
+
+    function addNewBlock(type) {
+      const newBlock = {
+        id: Date.now().toString(),
+        type: type,
+        content: ''
+      };
+      appState.docData.blocks.push(newBlock);
+      syncNewspaperDataToCanvas(appState.docData);
+      queueDocumentSave();
+    }
+
+    function removeBlock(blockId) {
+      appState.docData.blocks = appState.docData.blocks.filter(b => b.id !== blockId);
+      syncNewspaperDataToCanvas(appState.docData);
+      queueDocumentSave();
+    }
+
+    function shiftBlockOrder(blockId, direction) {
+      const blocks = appState.docData.blocks;
+      const index = blocks.findIndex(b => b.id === blockId);
+      if (index === -1) return;
+
+      const targetIndex = index + direction;
+      if (targetIndex < 0 || targetIndex >= blocks.length) return;
+
+      // 순서 변경 스왑
+      const temp = blocks[index];
+      blocks[index] = blocks[targetIndex];
+      blocks[targetIndex] = temp;
+
+      syncNewspaperDataToCanvas(appState.docData);
+      queueDocumentSave();
+    }
+
+    // Gemini AI API를 활용한 기사 다듬기 로직
+    async function requestGeminiAIPolish(blockId, blockType) {
+      const block = appState.docData.blocks.find(b => b.id === blockId);
+      if (!block || !block.content.trim()) {
+        showToast("먼저 가공할 본문을 적어주세요.", "info");
+        return;
+      }
+
+      const originalBtn = document.getElementById(`block-${blockId}`).querySelector('.btn-ai-sparkle');
+      const btnText = originalBtn.querySelector('.ai-btn-text');
+      
+      originalBtn.disabled = true;
+      btnText.textContent = "AI 작업 중...";
+
+      try {
+        let systemPrompt = "";
+        let userPrompt = "";
+
+        if (blockType === 'headline') {
+          systemPrompt = "너는 30년차 신문사의 노련한 헤드라인 편집위원이야. 결과를 다른 설명이나 서두 없이 딱 깔끔한 한줄짜리 헤드라인 텍스트 자체만 돌려줘.";
+          userPrompt = `다음 기사 내용을 함축하는 임팩트 있는 고해상도 신문 헤드라인을 1개 추천해줘:\n\n${block.content}`;
+        } else {
+          systemPrompt = "너는 보도 기사 전용 에디터 전문가야. 결과를 부가 설명 없이 정제된 최종 보도자료 기사 본문 텍스트 자체만 돌려줘.";
+          userPrompt = `다음 문장들의 맞춤법을 전면 교정하고, '서울 연합뉴스' 등에서 보도하는 건조하고 전문적인 전통 신문 기사 문체로 자연스럽게 가다듬어줘:\n\n${block.content}`;
+        }
+
+        const generatedText = await callGeminiAPI(userPrompt, systemPrompt);
+        if (generatedText && generatedText.trim()) {
+          triggerBlockContentChange(blockId, generatedText.trim());
+          // 캔버스 실시간 피드백
+          const targetTextArea = document.getElementById(`block-${blockId}`).querySelector('textarea');
+          if (targetTextArea) {
+            targetTextArea.value = generatedText.trim();
+            autoResizeTextArea(targetTextArea);
+          }
+          showToast("AI 기사 가공을 성공적으로 완료했습니다.");
+        } else {
+          showToast("AI 응답을 수신하는 데 실패했습니다.", "error");
+        }
+      } catch (err) {
+        console.error("AI Assistant network error:", err);
+        showToast("AI 처리 과정 중 통신 장애가 발생했습니다.", "error");
+      } finally {
+        originalBtn.disabled = false;
+        btnText.textContent = blockType === 'headline' ? 'AI 추천' : '기자체 교정';
+      }
+    }
+
+    // Gemini API 실체 호출 구현체
+    async function callGeminiAPI(prompt, systemInstruction) {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
+      const payload = {
+        contents: [{ parts: [{ text: prompt }] }],
+        systemInstruction: { parts: [{ text: systemInstruction }] }
+      };
+
+      let retries = 3;
+      let delay = 1000;
+      while (retries > 0) {
+        try {
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          if (!response.ok) throw new Error('API request failed');
+          const data = await response.json();
+          return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        } catch (error) {
+          retries--;
+          if (retries === 0) throw error;
+          await new Promise(resolve => setTimeout(resolve, delay));
+          delay *= 2;
+        }
+      }
+    }
+
+    // 로컬 이미지 전처리 압축기 (지나치게 큰 원본 파일로 파이어베이스 DB가 뻗는 걸 완벽 방지)
+    const compressImage = (file) => {
+      return new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const img = new Image();
+          img.onload = () => {
+            const canvas = document.createElement('canvas');
+            let { width, height } = img;
+            const maxDim = 800; // 최대 너비/높이를 800px로 압축
+            if (width > height && width > maxDim) {
+              height *= maxDim / width;
+              width = maxDim;
+            } else if (height > maxDim) {
+              width *= maxDim / height;
+              height = maxDim;
+            }
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0, width, height);
+            resolve(canvas.toDataURL('image/jpeg', 0.8)); // 80% 압축률
+          };
+          img.src = e.target.result;
+        };
+        reader.readAsDataURL(file);
+      });
+    };
+
+    // DOM 이벤트 리스너 취합 및 시스템 개시
+    window.onload = async function() {
+      lucide.createIcons();
+
+      // Firebase 익명/커스텀 인증 연동
+      try {
+        if (initialAuthToken) {
+          await signInWithCustomToken(auth, initialAuthToken);
         } else {
           await signInAnonymously(auth);
         }
       } catch (err) {
-        console.error("Auth error:", err);
+        console.error("Auth init failure:", err);
+        showToast("데이터베이스 인증 과정에 실패했습니다.", "error");
+      }
+
+      onAuthStateChanged(auth, (user) => {
+        appState.user = user;
+        if (user) {
+          initArchiveSubscription();
+        }
+      });
+
+      // 1. 로그인 폼 전송
+      document.getElementById('login-form').addEventListener('submit', (e) => {
+        e.preventDefault();
+        const nickname = document.getElementById('login-nickname').value;
+        const passcode = document.getElementById('login-passcode').value;
+        handleLoginFlow(nickname, passcode);
+      });
+
+      // 2. 방 생성 / 참가 폼 전송
+      document.getElementById('join-room-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const roomId = document.getElementById('room-input').value.trim();
+        if (roomId) {
+          // 사용자가 직접 방 이름을 입력하여 참여 권한을 획득
+          if (!appState.joinedRooms.includes(roomId)) {
+            appState.joinedRooms.push(roomId);
+            const userRef = doc(db, 'artifacts', appId, 'public', 'data', 'users', appState.nickname);
+            try {
+              await updateDoc(userRef, { joinedRooms: appState.joinedRooms });
+              showToast(`새로운 방 [${roomId}]에 성공적으로 접속했습니다.`);
+            } catch (err) {
+              console.error("Room join update failed:", err);
+            }
+          }
+          document.getElementById('room-input').value = ''; // 입력창 초기화
+          enterEditorRoom(roomId);
+        }
+      });
+
+      // 3. 네비게이션 액션
+      document.getElementById('logo-btn').addEventListener('click', () => {
+        if (appState.nickname) switchView('archive');
+      });
+
+      document.getElementById('btn-leave-room').addEventListener('click', () => {
+        if (roomUnsubscribe) roomUnsubscribe();
+        switchView('archive');
+      });
+
+      document.getElementById('btn-logout').addEventListener('click', () => {
+        if (roomUnsubscribe) roomUnsubscribe();
+        appState.nickname = '';
+        appState.activeRoomId = '';
+        switchView('login');
+      });
+
+      // 4. 지면 추가 구성요소 이벤트 배정
+      document.getElementById('add-block-headline').addEventListener('click', () => addNewBlock('headline'));
+      document.getElementById('add-block-text').addEventListener('click', () => addNewBlock('text'));
+      document.getElementById('add-block-image').addEventListener('click', () => addNewBlock('image'));
+
+      // 5. 디자인 테마 드롭다운 변경 리스너
+      document.getElementById('theme-selector').addEventListener('change', (e) => {
+        updateLocalDoc({ theme: e.target.value });
+      });
+
+      // 6. 실시간 제호 및 메타 데이터 변경 리스너
+      document.getElementById('input-newspaper-title').addEventListener('input', (e) => {
+        appState.docData.title = e.target.value;
+        queueDocumentSave();
+      });
+      document.getElementById('input-newspaper-date').addEventListener('input', (e) => {
+        appState.docData.date = e.target.value;
+        queueDocumentSave();
+      });
+      document.getElementById('input-newspaper-issue').addEventListener('input', (e) => {
+        appState.docData.issueName = e.target.value;
+        queueDocumentSave();
+      });
+      document.getElementById('input-newspaper-publisher').addEventListener('input', (e) => {
+        appState.docData.publisher = e.target.value;
+        queueDocumentSave();
+      });
+
+      // 7. AI 비서 토글 스위치 이벤트
+      document.getElementById('ai-toggle-switch').addEventListener('click', () => {
+        appState.aiEnabled = !appState.aiEnabled;
+        const handle = document.getElementById('ai-toggle-handle');
+        const sw = document.getElementById('ai-toggle-switch');
+        const icon = document.getElementById('ai-icon-indicator');
+
+        if (appState.aiEnabled) {
+          handle.className = "inline-block h-4 w-4 transform rounded-full bg-white transition-transform translate-x-5";
+          sw.className = "relative inline-flex h-6 w-11 items-center rounded-full border-2 border-black transition-colors bg-purple-600";
+          icon.className = "w-4 h-4 text-purple-600 transition-colors";
+          showToast("AI 기자 비서가 켜졌습니다. 기사 지면에 마우스를 올려 사용하세요.", "info");
+        } else {
+          handle.className = "inline-block h-4 w-4 transform rounded-full bg-white transition-transform translate-x-1";
+          sw.className = "relative inline-flex h-6 w-11 items-center rounded-full border-2 border-black transition-colors bg-gray-200";
+          icon.className = "w-4 h-4 text-black transition-colors";
+          showToast("AI 기자 비서가 꺼졌습니다.", "info");
+        }
+
+        // 지면 재생성으로 AI 키트 보이기/숨기기 갱신
+        if (appState.docData) {
+          syncNewspaperDataToCanvas(appState.docData);
+        }
+      });
+
+      // 8. 고화질 인쇄 전용 브라우저 드라이버 연동
+      document.getElementById('btn-trigger-print').addEventListener('click', () => {
+        window.print();
+      });
+
+      // 전역 업데이트 헬퍼 (Firestore updateDoc과 이름 충돌 방지)
+      function updateLocalDoc(updates) {
+        appState.docData = { ...appState.docData, ...updates };
+        syncNewspaperDataToCanvas(appState.docData);
+        queueDocumentSave();
       }
     };
-    initAuth();
-    const unsubscribe = onAuthStateChanged(auth, setUser);
-    return () => unsubscribe();
-  }, []);
-
-  // 2. 아카이브(저장된 신문) 목록 불러오기
-  useEffect(() => {
-    if (!user) return;
-    const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'newspapers');
-    const unsub = onSnapshot(colRef, (snap) => {
-      const docs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      docs.sort((a, b) => (b.lastUpdatedAt || 0) - (a.lastUpdatedAt || 0));
-      setArchiveList(docs);
-    }, (err) => console.error("Archive fetch error:", err));
-    return () => unsub();
-  }, [user]);
-
-  const handleLogin = (name) => {
-    setNickname(name);
-    setCurrentView('archive');
-  };
-
-  const handleJoinRoom = (roomId) => {
-    if (!roomId.trim()) return alert("방 이름을 입력해주세요.");
-    setActiveRoomId(roomId);
-    setCurrentView('editor');
-  };
-
-  const handleLeaveRoom = () => {
-    setActiveRoomId('');
-    setCurrentView('archive');
-  };
-
-  const handleLogout = () => {
-    setNickname('');
-    setCurrentView('login');
-  };
-
-  if (!user) return <div className="min-h-screen flex items-center justify-center font-bold">서버 연결 중...</div>;
-
-  return (
-    <div className="min-h-screen bg-gray-50 text-black font-sans font-medium selection:bg-black selection:text-white pb-20">
-      <style>{`
-        @media print {
-          body { background-color: white; margin: 0; padding: 0; }
-          .no-print { display: none !important; }
-          .print-only { display: block !important; }
-          .newspaper-page { box-shadow: none !important; border: none !important; width: 100% !important; max-width: 100% !important; padding: 0 !important; margin: 0 !important; }
-          .block-controls { display: none !important; }
-          input, textarea { resize: none; overflow: hidden; border: none !important; background: transparent !important; outline: none !important; }
-        }
-        @page { size: A4 portrait; margin: 15mm; }
-        .font-serif { font-family: 'Noto Sans KR', 'Pretendard', sans-serif; }
-      `}</style>
-
-      {/* 헤더 */}
-      <header className="no-print border-b-4 border-black bg-white p-4 sticky top-0 z-50">
-        <div className="max-w-6xl mx-auto flex justify-between items-center">
-          <h1 className="text-2xl font-black tracking-tighter flex items-center gap-2 cursor-pointer" onClick={() => nickname && setCurrentView('archive')}>
-            <FileText size={28} /> NEWS MAKER
-          </h1>
-          {nickname && (
-            <div className="flex items-center gap-4">
-              <span className="font-bold bg-gray-100 px-3 py-1 border-2 border-black">
-                👤 {nickname}
-              </span>
-              {currentView === 'editor' && (
-                <Button variant="secondary" onClick={handleLeaveRoom}>서류함으로</Button>
-              )}
-              {currentView === 'archive' && (
-                <Button variant="secondary" onClick={handleLogout}>로그아웃</Button>
-              )}
-            </div>
-          )}
-        </div>
-      </header>
-
-      {/* 메인 뷰 전환 */}
-      <main className="p-4 md:p-8 max-w-6xl mx-auto">
-        {currentView === 'login' && <LoginView onLogin={handleLogin} />}
-        {currentView === 'archive' && <ArchiveView archiveList={archiveList} onJoin={handleJoinRoom} />}
-        {currentView === 'editor' && (
-          <CollaborativeEditor 
-            user={user} 
-            nickname={nickname}
-            roomId={activeRoomId} 
-            aiEnabled={aiEnabled} 
-            setAiEnabled={setAiEnabled} 
-          />
-        )}
-      </main>
-    </div>
-  );
-}
-
-// ==========================================
-// 로그인 뷰 (이름 + 패스코드 확인)
-// ==========================================
-function LoginView({ onLogin }) {
-  const [name, setName] = useState('');
-  const [passcode, setPasscode] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (!name.trim()) return alert("에디터 이름을 입력해 주세요.");
-    if (!passcode.trim()) return alert("비밀번호를 입력해 주세요.");
-
-    setIsLoading(true);
-    try {
-      const userDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'users', name.trim());
-      const userSnapshot = await getDoc(userDocRef);
-
-      if (userSnapshot.exists()) {
-        const userData = userSnapshot.data();
-        if (userData.passcode === passcode) {
-          // 비밀번호 일치 - 기존 계정으로 로그인 성공
-          onLogin(name.trim());
-        } else {
-          // 비밀번호 불일치 - 도용 차단
-          alert("이미 사용 중인 닉네임입니다. 비밀번호가 일치하지 않거나 다른 고유한 닉네임을 설정해 주세요.");
-        }
-      } else {
-        // 존재하지 않는 새로운 계정인 경우 신규 등록
-        await setDoc(userDocRef, {
-          passcode: passcode,
-          createdAt: Date.now()
-        });
-        alert(`신규 에디터 계정 [${name.trim()}] 등록 및 로그인이 완료되었습니다.`);
-        onLogin(name.trim());
-      }
-    } catch (err) {
-      console.error("Login verification error:", err);
-      alert("로그인 처리 중 오류가 발생했습니다.");
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  return (
-    <div className="max-w-md mx-auto mt-20 bg-white border-4 border-black p-8 shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] animate-in fade-in slide-in-from-bottom-4">
-      <div className="text-center mb-8">
-        <h2 className="text-3xl font-black mb-2">신문사 입장</h2>
-        <p className="font-bold text-gray-600">중복을 방지하기 위해 나만의 고유한 닉네임과 비밀번호를 설정해 주세요.</p>
-      </div>
-      <form onSubmit={handleSubmit} className="space-y-6">
-        <div>
-          <label className="block font-black text-lg mb-1">에디터명 (닉네임)</label>
-          <p className="text-xs text-gray-500 mb-2 font-bold">처음 방문하는 닉네임일 시 자동으로 신규 등록됩니다.</p>
-          <input 
-            type="text" required value={name} onChange={e => setName(e.target.value)}
-            disabled={isLoading}
-            className="w-full border-2 border-black p-3 font-bold outline-none focus:ring-2 focus:ring-black"
-            placeholder="예: 민우기자, 예지편집장"
-          />
-        </div>
-        <div>
-          <label className="block font-black text-lg mb-2">계정 비밀번호</label>
-          <input 
-            type="password" required value={passcode} onChange={e => setPasscode(e.target.value)}
-            disabled={isLoading}
-            className="w-full border-2 border-black p-3 font-bold outline-none focus:ring-2 focus:ring-black"
-            placeholder="숫자나 문자로 구성된 비밀번호"
-          />
-        </div>
-        <Button type="submit" disabled={isLoading} className="w-full py-4 text-lg">
-          {isLoading ? <Loader2 className="animate-spin" size={20} /> : <LogIn size={20} />} 
-          {isLoading ? '신원 확인 중...' : '계정 확인 및 시작하기'}
-        </Button>
-      </form>
-    </div>
-  );
-}
-
-// ==========================================
-// 서류 정리함 (Archive View)
-// ==========================================
-function ArchiveView({ archiveList, onJoin }) {
-  const [newRoomId, setNewRoomId] = useState('');
-
-  return (
-    <div className="animate-in fade-in duration-500">
-      <div className="flex flex-col md:flex-row justify-between items-start md:items-end mb-8 border-b-4 border-black pb-4 gap-4">
-        <div>
-          <h2 className="text-4xl font-black tracking-tight">발행 서류함</h2>
-          <p className="text-gray-600 mt-2 font-bold">저장된 신문 목록입니다. 방 이름을 입력해 새 신문을 만들거나 기존 신문에 참여하세요.</p>
-        </div>
-        <form onSubmit={(e) => { e.preventDefault(); onJoin(newRoomId); }} className="flex gap-2">
-          <input 
-            type="text" required value={newRoomId} onChange={e => setNewRoomId(e.target.value)}
-            className="border-2 border-black p-2 font-bold outline-none focus:ring-2 focus:ring-black w-48"
-            placeholder="비밀번호(방 이름)"
-          />
-          <Button type="submit" variant="primary"><Plus size={18} /> 새 방 만들기 / 참여</Button>
-        </form>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8 pt-4">
-        {archiveList.map((doc, idx) => (
-          <div 
-            key={doc.id} 
-            onClick={() => onJoin(doc.id)}
-            className="group relative bg-white border-4 border-black p-6 pt-10 cursor-pointer hover:-translate-y-2 hover:shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] transition-all"
-          >
-            <div className="absolute -top-[2px] -left-[4px] border-4 border-black border-b-0 bg-black text-white px-4 py-1 font-bold text-sm tracking-widest uppercase">
-              Room: {doc.id}
-            </div>
-            
-            <h3 className="text-2xl font-black mb-4 leading-tight group-hover:underline decoration-4 underline-offset-4">
-              {doc.title || '제목 없음'}
-            </h3>
-            
-            <div className="border-t-2 border-black pt-4 mt-4 space-y-2 text-sm font-bold text-gray-700">
-              <div className="flex justify-between">
-                <span>발행일자</span>
-                <span>{doc.date}</span>
-              </div>
-              <div className="flex justify-between">
-                <span>마지막 편집</span>
-                <span>{doc.lastUpdatedBy || '알 수 없음'}</span>
-              </div>
-            </div>
-          </div>
-        ))}
-        
-        {archiveList.length === 0 && (
-          <div className="col-span-full py-20 text-center border-4 border-dashed border-gray-300 bg-white">
-            <Folder size={48} className="mx-auto text-gray-300 mb-4" />
-            <p className="text-xl font-bold text-gray-400">보관된 신문이 없습니다.</p>
-            <p className="text-sm text-gray-400 mt-2">상단의 '새 방 만들기 / 참여'를 통해 첫 신문을 생성해보세요.</p>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ==========================================
-// 실시간 동시 편집 에디터 (Collaborative Editor)
-// ==========================================
-function CollaborativeEditor({ user, nickname, roomId, aiEnabled, setAiEnabled }) {
-  const [docData, setDocData] = useState(null);
-  const [savingStatus, setSavingStatus] = useState('저장됨'); // 저장 상태 표시
-  const saveTimeoutRef = useRef(null);
-
-  // 기본 문서 구조
-  const defaultDoc = {
-    title: '우리동네 타임즈',
-    date: new Date().toISOString().split('T')[0],
-    issueName: '제 1 호',
-    publisher: nickname,
-    theme: 'classic', // classic, modern, bold
-    blocks: [
-      { id: 'b1', type: 'headline', content: '여기에 메인 기사 제목을 적어주세요!' },
-      { id: 'b2', type: 'text', content: '기사 본문을 입력하는 공간입니다. 클릭해서 바로 수정해 보세요.' }
-    ],
-    lastUpdatedBy: nickname,
-    lastUpdatedAt: Date.now()
-  };
-
-  // Firestore 연결 및 실시간 동기화
-  useEffect(() => {
-    if (!user || !roomId) return;
-    const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'newspapers', roomId);
-
-    const unsubscribe = onSnapshot(docRef, (snapshot) => {
-      if (snapshot.exists()) {
-        setDocData(snapshot.data());
-      } else {
-        // 문서가 없으면 초기값 생성
-        setDoc(docRef, defaultDoc);
-      }
-    }, (error) => {
-      console.error("Firestore Error:", error);
-    });
-
-    return () => unsubscribe();
-  }, [user, roomId]);
-
-  // Firestore에 데이터 저장 (디바운스 적용)
-  const saveToFirebase = useCallback((newData) => {
-    setSavingStatus('저장 중...');
-    if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
-    
-    saveTimeoutRef.current = setTimeout(async () => {
-      try {
-        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'newspapers', roomId);
-        await setDoc(docRef, { 
-          ...newData, 
-          lastUpdatedBy: nickname,
-          lastUpdatedAt: Date.now() 
-        });
-        setSavingStatus('자동 저장 완료');
-        setTimeout(() => setSavingStatus(''), 2000);
-      } catch (error) {
-        console.error("Save Error:", error);
-        setSavingStatus('저장 실패');
-      }
-    }, 800);
-  }, [roomId, nickname]);
-
-  // 로컬 상태 업데이트 및 저장 트리거
-  const updateDoc = (updates) => {
-    const newData = { ...docData, ...updates };
-    setDocData(newData);
-    saveToFirebase(newData);
-  };
-
-  // 항목별 편집 핸들러
-  const updateHeader = (field, value) => updateDoc({ [field]: value });
-  
-  const addBlock = (type) => {
-    const newBlock = { id: Date.now().toString(), type, content: type === 'image' ? '' : '' };
-    updateDoc({ blocks: [...docData.blocks, newBlock] });
-  };
-
-  const updateBlock = (id, newContent) => {
-    const newBlocks = docData.blocks.map(b => b.id === id ? { ...b, content: newContent } : b);
-    updateDoc({ blocks: newBlocks });
-  };
-
-  const moveBlock = (index, dir) => {
-    if (index + dir < 0 || index + dir >= docData.blocks.length) return;
-    const newBlocks = [...docData.blocks];
-    const temp = newBlocks[index];
-    newBlocks[index] = newBlocks[index + dir];
-    newBlocks[index + dir] = temp;
-    updateDoc({ blocks: newBlocks });
-  };
-
-  const deleteBlock = (id) => {
-    updateDoc({ blocks: docData.blocks.filter(b => b.id !== id) });
-  };
-
-  const handlePrint = () => window.print();
-
-  if (!docData) return <div className="flex justify-center p-20"><Loader2 className="animate-spin text-black" size={48} /></div>;
-
-  // 테마별 CSS 클래스 매핑
-  const themeStyles = {
-    classic: {
-      wrapper: "border-4 border-black p-8 lg:p-12 shadow-[16px_16px_0px_0px_rgba(0,0,0,0.1)]",
-      header: "border-b-8 border-double border-black pb-6 mb-6",
-      title: "font-serif text-5xl md:text-7xl font-black uppercase",
-      meta: "border-t-2 border-black font-bold uppercase",
-      block: "border-t-2 border-black pt-2",
-      headline: "font-serif text-3xl font-black"
-    },
-    modern: {
-      wrapper: "border-[1px] border-gray-300 p-8 lg:p-12 bg-white",
-      header: "border-b-[1px] border-gray-300 pb-8 mb-8",
-      title: "text-4xl md:text-6xl font-light tracking-tight",
-      meta: "text-gray-500 font-medium",
-      block: "border-t-[1px] border-gray-200 pt-4",
-      headline: "text-2xl font-bold tracking-tight"
-    },
-    bold: {
-      wrapper: "border-8 border-black p-8 lg:p-12 shadow-[16px_16px_0px_0px_rgba(0,0,0,1)]",
-      header: "border-b-8 border-black pb-4 mb-8 bg-black text-white px-4 pt-4",
-      title: "text-5xl md:text-7xl font-black uppercase tracking-tighter",
-      meta: "bg-black text-white font-black uppercase",
-      block: "border-t-4 border-black pt-2",
-      headline: "text-4xl font-black uppercase"
-    }
-  };
-
-  const currentTheme = themeStyles[docData.theme] || themeStyles.classic;
-
-  return (
-    <div className="flex flex-col lg:flex-row gap-8 animate-in fade-in duration-500">
-      
-      {/* 왼쪽: 컨트롤 패널 (인쇄 시 숨김) */}
-      <div className="lg:w-64 flex-shrink-0 no-print flex flex-col gap-6">
-        <div className="bg-white border-4 border-black p-4 space-y-4 sticky top-24">
-          
-          {/* 동기화 상태 */}
-          <div className="flex items-center justify-between border-b-2 border-black pb-2 mb-2">
-            <h3 className="font-black text-lg">작업 현황</h3>
-            <span className="flex items-center gap-1 text-sm font-bold text-green-600">
-              <Save size={14} /> {savingStatus || '동기화 됨'}
-            </span>
-          </div>
-
-          {/* 디자인 테마 변경 */}
-          <div className="space-y-2">
-            <label className="font-bold text-sm flex items-center gap-2"><LayoutTemplate size={16}/> 디자인 테마</label>
-            <select 
-              className="w-full border-2 border-black p-2 font-bold bg-gray-50 cursor-pointer"
-              value={docData.theme}
-              onChange={(e) => updateDoc({ theme: e.target.value })}
-            >
-              <option value="classic">클래식 모노톤</option>
-              <option value="modern">모던 미니멀</option>
-              <option value="bold">볼드 임팩트</option>
-            </select>
-          </div>
-
-          <div className="border-t-2 border-black pt-4 mt-4 space-y-2">
-            <Button variant="secondary" className="w-full justify-start" onClick={() => addBlock('headline')}>
-              <FileText size={16} /> 헤드라인 추가
-            </Button>
-            <Button variant="secondary" className="w-full justify-start" onClick={() => addBlock('text')}>
-              <FileText size={16} /> 본문 단락 추가
-            </Button>
-            <Button variant="secondary" className="w-full justify-start" onClick={() => addBlock('image')}>
-              <ImageIcon size={16} /> 사진 틀 추가
-            </Button>
-          </div>
-
-          <div className="border-t-2 border-black pt-4 mt-4 space-y-3">
-            <label className="flex items-center justify-between cursor-pointer group">
-              <span className="font-bold flex items-center gap-2">
-                <Wand2 size={16} className={aiEnabled ? "text-purple-600" : ""} /> 
-                AI 기자 비서
-              </span>
-              <div className={`relative inline-flex h-6 w-11 items-center rounded-full border-2 border-black transition-colors ${aiEnabled ? 'bg-black' : 'bg-gray-200'}`}>
-                <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${aiEnabled ? 'translate-x-5' : 'translate-x-1'}`} />
-              </div>
-              <input type="checkbox" className="hidden" checked={aiEnabled} onChange={() => setAiEnabled(!aiEnabled)} />
-            </label>
-          </div>
-
-          <div className="border-t-2 border-black pt-4 mt-4">
-            <Button variant="primary" className="w-full py-3" onClick={handlePrint}>
-              <Printer size={18} /> 고화질 인쇄 / PDF 저장
-            </Button>
-          </div>
-        </div>
-      </div>
-
-      {/* 오른쪽: 신문 캔버스 */}
-      <div className="flex-grow flex justify-center">
-        {/* A4 비율 컨테이너 */}
-        <div className={`newspaper-page bg-white w-full max-w-[800px] min-h-[1130px] flex flex-col transition-all duration-300 ${currentTheme.wrapper}`}>
-          
-          {/* 신문 헤더 영역 */}
-          <div className={`text-center relative group transition-all ${currentTheme.header}`}>
-             <input 
-                type="text" 
-                className={`w-full text-center outline-none bg-transparent ${currentTheme.title} placeholder:text-gray-300`}
-                value={docData.title}
-                onChange={(e) => updateHeader('title', e.target.value)}
-                placeholder="신문 제호 입력"
-             />
-             <div className={`flex justify-between items-center mt-4 pt-2 text-sm md:text-base tracking-widest ${currentTheme.meta}`}>
-                <input 
-                  type="date" 
-                  className="bg-transparent outline-none cursor-pointer" 
-                  value={docData.date}
-                  onChange={(e) => updateHeader('date', e.target.value)}
-                />
-                <input 
-                  type="text" 
-                  className="bg-transparent outline-none text-center w-1/3 placeholder:text-gray-400" 
-                  value={docData.issueName}
-                  onChange={(e) => updateHeader('issueName', e.target.value)}
-                  placeholder="통권 제 O 호"
-                />
-                <div className="flex items-center gap-1 justify-end">
-                  <span>발행인:</span>
-                  <input 
-                    type="text" 
-                    className="bg-transparent outline-none w-24 text-right placeholder:text-gray-400" 
-                    value={docData.publisher}
-                    onChange={(e) => updateHeader('publisher', e.target.value)}
-                    placeholder="발행인 이름"
-                  />
-                </div>
-             </div>
-          </div>
-
-          {/* 본문 그리드 영역 */}
-          <div className="flex-grow space-y-6" style={{ columnCount: 1, columnGap: '2rem' }}>
-            <div className="md:columns-2 gap-8 space-y-8">
-              {docData.blocks.map((block, index) => (
-                <div key={block.id} className={`relative group break-inside-avoid ${currentTheme.block}`}>
-                  
-                  {/* 블록 컨트롤 */}
-                  <div className="block-controls absolute -left-4 -top-4 opacity-0 group-hover:opacity-100 transition-opacity bg-white border-2 border-black flex flex-col z-10 shadow-sm">
-                    <button onClick={() => moveBlock(index, -1)} className="p-1 hover:bg-gray-200 border-b-2 border-black"><ArrowUp size={14} /></button>
-                    <button onClick={() => moveBlock(index, 1)} className="p-1 hover:bg-gray-200 border-b-2 border-black"><ArrowDown size={14} /></button>
-                    <button onClick={() => deleteBlock(block.id)} className="p-1 hover:bg-red-100 text-red-600"><Trash2 size={14} /></button>
-                  </div>
-
-                  {/* 블록 렌더링 */}
-                  {block.type === 'headline' && (
-                    <AiInputWrapper aiEnabled={aiEnabled} blockType="headline" content={block.content} onUpdate={(c) => updateBlock(block.id, c)}>
-                      <textarea
-                        className={`w-full leading-tight outline-none bg-transparent resize-none overflow-hidden placeholder-gray-300 ${currentTheme.headline}`}
-                        value={block.content}
-                        onChange={(e) => {
-                          e.target.style.height = 'auto';
-                          e.target.style.height = e.target.scrollHeight + 'px';
-                          updateBlock(block.id, e.target.value);
-                        }}
-                        placeholder="헤드라인을 입력하세요"
-                        rows={1}
-                      />
-                    </AiInputWrapper>
-                  )}
-
-                  {block.type === 'text' && (
-                    <AiInputWrapper aiEnabled={aiEnabled} blockType="text" content={block.content} onUpdate={(c) => updateBlock(block.id, c)}>
-                      <textarea
-                        className="w-full text-base font-medium leading-relaxed outline-none bg-transparent resize-none overflow-hidden placeholder-gray-300 text-justify"
-                        value={block.content}
-                        onChange={(e) => {
-                          e.target.style.height = 'auto';
-                          e.target.style.height = e.target.scrollHeight + 'px';
-                          updateBlock(block.id, e.target.value);
-                        }}
-                        placeholder="기사 본문을 자유롭게 작성하세요..."
-                        rows={5}
-                      />
-                    </AiInputWrapper>
-                  )}
-
-                  {block.type === 'image' && (
-                    <div className="w-full">
-                      {block.content ? (
-                        <div className="relative group/img">
-                          <img src={block.content} alt="Article visual" className={`w-full h-auto ${docData.theme === 'modern' ? 'border-none rounded' : 'border-2 border-black grayscale'}`} />
-                          <button 
-                            onClick={() => updateBlock(block.id, '')}
-                            className="no-print absolute top-2 right-2 bg-black text-white p-2 rounded-full opacity-0 group-hover/img:opacity-100 transition-opacity"
-                          >
-                            <Trash2 size={16} />
-                          </button>
-                        </div>
-                      ) : (
-                        <label className="no-print flex flex-col items-center justify-center w-full h-48 border-4 border-dashed border-gray-300 cursor-pointer hover:border-black transition-colors bg-gray-50">
-                          <ImageIcon size={32} className="text-gray-400 mb-2" />
-                          <span className="font-bold text-gray-500">클릭하여 사진 추가</span>
-                          <input 
-                            type="file" 
-                            accept="image/*" 
-                            className="hidden" 
-                            onChange={async (e) => {
-                              const file = e.target.files[0];
-                              if (file) {
-                                const compressedDataUrl = await compressImage(file);
-                                updateBlock(block.id, compressedDataUrl);
-                              }
-                            }} 
-                          />
-                        </label>
-                      )}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-          
-          <div className="mt-8 border-t-2 border-black pt-2 text-center text-xs font-bold uppercase tracking-widest text-gray-400">
-            Created with News Maker Platform
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ==========================================
-// AI 비서 래퍼 (Hover & Focus 개선 버전)
-// ==========================================
-function AiInputWrapper({ aiEnabled, blockType, content, onUpdate, children }) {
-  const [isLoading, setIsLoading] = useState(false);
-
-  const handleAiAction = async (actionType) => {
-    if (!content.trim()) return alert("먼저 텍스트를 입력해주세요.");
-    setIsLoading(true);
-    try {
-      const prompt = actionType === 'headline' 
-        ? `다음 내용을 바탕으로 신문에 어울리는 자극적이고 시선을 끄는 짧은 헤드라인 1개만 제시해줘.\n내용: ${content}`
-        : `다음 텍스트를 맞춤법에 맞게 수정하고, 전문적인 신문 기사 문체로 변환해줘.\n원문: ${content}`;
-      const instruction = actionType === 'headline' 
-        ? "결과를 다른 말 없이 딱 헤드라인 텍스트만 출력해."
-        : "너는 프로 기자야. 기사 본문 결과만 출력해.";
-
-      const result = await callGeminiAPI(prompt, instruction);
-      if (result) onUpdate(result);
-    } catch (error) {
-      alert("AI 처리 중 오류가 발생했습니다.");
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  return (
-    <div className="relative w-full group/ai p-1 -m-1 border-2 border-transparent hover:border-purple-200 transition-colors">
-      {children}
-      {aiEnabled && (
-        <div className="no-print absolute -top-4 right-0 opacity-0 group-hover/ai:opacity-100 focus-within:opacity-100 transition-opacity z-20 flex gap-1">
-          <button 
-            onClick={() => handleAiAction(blockType)}
-            disabled={isLoading}
-            className="flex items-center gap-1 bg-purple-600 text-white text-xs px-3 py-1.5 font-bold rounded-md border-2 border-black hover:bg-purple-700 shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]"
-          >
-            {isLoading ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
-            {blockType === 'headline' ? 'AI 추천' : '기자체 교정'}
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
+  </script>
+</body>
+</html>
